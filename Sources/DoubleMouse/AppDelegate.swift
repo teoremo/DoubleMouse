@@ -1,6 +1,6 @@
 import AppKit
 
-private let sensitivityOptions: [Double] = [0.5, 0.75, 1.0, 1.5, 2.0]
+private let sensitivityOptions: [Double] = [0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0]
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
