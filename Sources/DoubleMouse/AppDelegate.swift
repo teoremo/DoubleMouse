@@ -66,6 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         summary.isEnabled = false
         menu.addItem(summary)
 
+        if !hidMonitor.hasInputMonitoringAccess {
+            let input = NSMenuItem(title: "Grant Input Monitoring Permission", action: #selector(requestInputMonitoringPermission), keyEquivalent: "")
+            input.target = self
+            menu.addItem(input)
+        }
+
         if !AXIsProcessTrusted() {
             let permission = NSMenuItem(title: "Grant Accessibility Permission", action: #selector(requestAccessibilityPermission), keyEquivalent: "")
             permission.target = self
@@ -132,6 +138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func assignSecondaryFromNextMovement() {
         hidMonitor.assignSecondaryDeviceFromNextMovement()
+    }
+
+    @objc private func requestInputMonitoringPermission() {
+        if !hidMonitor.requestInputMonitoringAccess() {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+        }
     }
 
     @objc private func requestAccessibilityPermission() {
