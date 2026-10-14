@@ -16,8 +16,9 @@ func scaledDelta(_ delta: CGPoint, sensitivity: Double, acceleration: Bool) -> C
 }
 
 final class PointerOverlayController {
-    private let window: NSWindow
-    private let pointerView = PointerView(frame: .zero)
+    /// One window per display. With "Displays have separate Spaces" a single window cannot
+    /// span monitors, so a union-sized window is only drawn on one of them.
+    private var overlays: [(window: NSWindow, view: PointerView)] = []
 
     var sensitivity = UserDefaults.standard.object(forKey: "sensitivity") as? Double ?? 1.0 {
         didSet { UserDefaults.standard.set(sensitivity, forKey: "sensitivity") }
@@ -27,27 +28,14 @@ final class PointerOverlayController {
         didSet { UserDefaults.standard.set(acceleration, forKey: "acceleration") }
     }
 
-    /// Screen coordinates. The view draws in its own space, so it gets the converted point.
+    /// Screen coordinates. Each view draws in its own space, so it gets the converted point.
     private(set) var secondaryPointerPosition = CGPoint(x: NSScreen.main?.frame.midX ?? 400, y: NSScreen.main?.frame.midY ?? 300)
 
     init() {
-        window = NSWindow(
-            contentRect: PointerOverlayController.screensFrame(),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.level = .screenSaver
-        window.ignoresMouseEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
-        window.contentView = pointerView
-
-        syncViewPosition()
+        rebuildOverlays()
 
         // Plugging in a display or changing resolution moves every screen origin. Without
-        // this the overlay keeps the old frame and the pointer cannot reach the new screen.
+        // this the overlays keep the old frames and the pointer cannot reach the new screen.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -58,7 +46,8 @@ final class PointerOverlayController {
     }
 
     func show() {
-        window.orderFrontRegardless()
+        overlays.forEach { $0.window.orderFrontRegardless() }
+        debugLog("overlays \(overlays.map { $0.window.frame })")
     }
 
     func moveSecondaryBy(_ delta: CGPoint) {
@@ -66,37 +55,77 @@ final class PointerOverlayController {
         secondaryPointerPosition = clampedPoint(
             CGPoint(x: secondaryPointerPosition.x + scaled.x, y: secondaryPointerPosition.y - scaled.y)
         )
-        syncViewPosition()
+        syncViewPositions()
     }
 
     func pulseSecondary() {
-        pointerView.pulse()
+        overlays.forEach { $0.view.pulse() }
+    }
+
+    private func rebuildOverlays() {
+        let wasVisible = overlays.contains { $0.window.isVisible }
+        overlays.forEach { $0.window.orderOut(nil) }
+        overlays = NSScreen.screens.map { screen in
+            let window = NSWindow(
+                contentRect: screen.frame,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false,
+                screen: screen
+            )
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.level = .screenSaver
+            window.ignoresMouseEvents = true
+            window.hasShadow = false
+            window.isReleasedWhenClosed = false
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+            let view = PointerView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            window.contentView = view
+            window.setFrame(screen.frame, display: false)
+            return (window, view)
+        }
+        syncViewPositions()
+        if wasVisible {
+            show()
+        }
     }
 
     private func screensChanged() {
-        window.setFrame(PointerOverlayController.screensFrame(), display: true)
+        rebuildOverlays()
         secondaryPointerPosition = clampedPoint(secondaryPointerPosition)
-        syncViewPosition()
+        syncViewPositions()
     }
 
-    private func syncViewPosition() {
-        let origin = window.frame.origin
-        pointerView.pointerPosition = CGPoint(
-            x: secondaryPointerPosition.x - origin.x,
-            y: secondaryPointerPosition.y - origin.y
-        )
+    private func syncViewPositions() {
+        for overlay in overlays {
+            let origin = overlay.window.frame.origin
+            overlay.view.pointerPosition = CGPoint(
+                x: secondaryPointerPosition.x - origin.x,
+                y: secondaryPointerPosition.y - origin.y
+            )
+        }
     }
 
-    private static func screensFrame() -> CGRect {
-        NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }
-    }
-
+    /// Keeps the pointer on an actual screen. Displays of different sizes leave empty
+    /// corners inside their bounding box, and the pointer must not disappear into them.
     private func clampedPoint(_ point: CGPoint) -> CGPoint {
-        let frame = window.frame
-        return CGPoint(
-            x: min(max(point.x, frame.minX), frame.maxX),
-            y: min(max(point.y, frame.minY), frame.maxY)
-        )
+        var best = point
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for screen in NSScreen.screens {
+            let frame = screen.frame
+            // maxX/maxY are one past the last pixel.
+            let candidate = CGPoint(
+                x: min(max(point.x, frame.minX), frame.maxX - 1),
+                y: min(max(point.y, frame.minY), frame.maxY - 1)
+            )
+            let distance = hypot(candidate.x - point.x, candidate.y - point.y)
+            if distance < bestDistance {
+                bestDistance = distance
+                best = candidate
+            }
+        }
+        return best
     }
 }
 

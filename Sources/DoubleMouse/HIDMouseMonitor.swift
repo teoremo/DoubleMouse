@@ -103,18 +103,19 @@ final class HIDMouseMonitor {
         let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         IOHIDManagerRegisterDeviceMatchingCallback(manager, deviceAddedCallback, context)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, deviceRemovedCallback, context)
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         let managerResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        startRateLogging()
         debugLog("manager open: \(String(format: "0x%08x", managerResult))")
     }
 
     func stop() {
         for device in devices.values {
-            IOHIDDeviceUnscheduleFromRunLoop(device.reference, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            IOHIDDeviceUnscheduleFromRunLoop(device.reference, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
             IOHIDDeviceClose(device.reference, IOOptionBits(kIOHIDOptionsTypeNone))
         }
         seizedSecondaryDeviceID = nil
-        IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     }
 
@@ -174,7 +175,7 @@ final class HIDMouseMonitor {
 
         let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         IOHIDDeviceRegisterInputValueCallback(device, inputValueCallback, context)
-        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         let openResult = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         debugLog("added id=\(id) \(deviceName(for: device)) key=\(key) open=\(String(format: "0x%08x", openResult))")
 
@@ -192,7 +193,7 @@ final class HIDMouseMonitor {
 
     fileprivate func deviceRemoved(_ device: IOHIDDevice) {
         let id = deviceID(for: device)
-        IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
         devices.removeValue(forKey: id)
 
@@ -208,15 +209,29 @@ final class HIDMouseMonitor {
         delegate?.mouseMonitorDevicesChanged(self)
     }
 
+    private var reportCounts: [UInt64: Int] = [:]
+    private var rateTimer: Timer?
+
+    private func startRateLogging() {
+        guard debugEnabled, rateTimer == nil else { return }
+        rateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, !self.reportCounts.isEmpty || !self.devices.isEmpty else { return }
+            let line = self.devices.keys.sorted().map { "\($0)\($0 == self.secondaryDeviceID ? "(blue)" : ""):\(self.reportCounts[$0] ?? 0)" }
+            debugLog("rate/s " + line.joined(separator: " ") + " seized=\(self.seizedSecondaryDeviceID.map(String.init) ?? "none")")
+            self.reportCounts.removeAll()
+        }
+    }
+
     fileprivate func inputValue(_ value: IOHIDValue) {
         let element = IOHIDValueGetElement(value)
         let deviceID = deviceID(for: IOHIDElementGetDevice(element))
+        reportCounts[deviceID, default: 0] += 1
 
         let usagePage = IOHIDElementGetUsagePage(element)
         let usage = IOHIDElementGetUsage(element)
         let intValue = IOHIDValueGetIntegerValue(value)
 
-        if debugEnabled, intValue != 0, usagePage == kHIDPage_GenericDesktop || usagePage == kHIDPage_Button || usagePage == kHIDPage_Consumer {
+        if debugEnabled, (intValue != 0 || usagePage == kHIDPage_Button), usagePage == kHIDPage_GenericDesktop || usagePage == kHIDPage_Button || usagePage == kHIDPage_Consumer {
             debugLog("event dev=\(deviceID) blue=\(deviceID == secondaryDeviceID) page=\(usagePage) usage=\(usage) value=\(intValue)")
         }
 

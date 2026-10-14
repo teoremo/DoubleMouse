@@ -10,6 +10,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let mainButtonGuard = MainButtonGuard()
     private var blueIgnoringPress = false
+    private var moveLogCount = 0
+    private var appToRestore: NSRunningApplication?
+
+    private var keepFocus = UserDefaults.standard.object(forKey: "keepFocus") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(keepFocus, forKey: "keepFocus") }
+    }
     private var didShowAccessibilityWarning = false
     private var blueButtonIsDown = false
     private var blueDragStarted = false
@@ -28,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if blueDragStarted {
-            clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
+            clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: clickPerformer.currentCursor())
         }
         mainButtonGuard.blocksMainButtons = false
         hidMonitor.stop()
@@ -70,6 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         accelerationItem.target = self
         accelerationItem.state = overlay.acceleration ? .on : .off
         menu.addItem(accelerationItem)
+
+        let focusItem = NSMenuItem(title: "Keep Keyboard Focus With Main Pointer", action: #selector(toggleKeepFocus), keyEquivalent: "")
+        focusItem.target = self
+        focusItem.state = keepFocus ? .on : .off
+        menu.addItem(focusItem)
 
         menu.addItem(.separator())
 
@@ -175,6 +186,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func toggleKeepFocus() {
+        keepFocus.toggle()
+        rebuildMenu()
+    }
+
+    /// A click activates the app under the blue pointer, which sends the keyboard there.
+    /// Remember the app being typed into and bring it back once the click has landed.
+    private func rememberFrontApp() {
+        guard keepFocus, !isInMenuBar(overlay.secondaryPointerPosition) else {
+            appToRestore = nil
+            return
+        }
+        let front = NSWorkspace.shared.frontmostApplication
+        appToRestore = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+    }
+
+    /// Menu bar clicks open menus, and re-activating another app would dismiss them.
+    private func isInMenuBar(_ point: CGPoint) -> Bool {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) else { return false }
+        return point.y >= screen.visibleFrame.maxY
+    }
+
+    private func restoreFrontApp() {
+        guard keepFocus, let app = appToRestore else { return }
+        appToRestore = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            guard NSWorkspace.shared.frontmostApplication != app, !app.isTerminated else { return }
+            let element = AXUIElementCreateApplication(app.processIdentifier)
+            let result = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+            debugLog("restore focus to \(app.localizedName ?? "?") result=\(result.rawValue)")
+        }
+    }
+
     @objc private func toggleAcceleration() {
         overlay.acceleration.toggle()
         rebuildMenu()
@@ -219,6 +263,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: HIDMouseMonitorDelegate {
     func mouseMonitor(_ monitor: HIDMouseMonitor, didMoveSecondaryBy delta: CGPoint) {
         overlay.moveSecondaryBy(delta)
+        moveLogCount += 1
+        if moveLogCount % 15 == 0 {
+            debugLog("move delta=\(delta) pos=\(overlay.secondaryPointerPosition) down=\(blueButtonIsDown) drag=\(blueDragStarted) ignoring=\(blueIgnoringPress)")
+        }
 
         guard blueButtonIsDown, !blueIgnoringPress else {
             return
@@ -229,10 +277,10 @@ extension AppDelegate: HIDMouseMonitorDelegate {
            hypot(point.x - bluePressPosition.x, point.y - bluePressPosition.y) >= 3 {
             blueDragStarted = true
             mainButtonGuard.blocksMainButtons = true
-            clickPerformer.beginDrag(at: bluePressPosition, returningTo: NSEvent.mouseLocation)
+            clickPerformer.beginDrag(at: bluePressPosition, returningTo: clickPerformer.currentCursor())
         }
         if blueDragStarted {
-            clickPerformer.drag(to: point, returningTo: NSEvent.mouseLocation)
+            clickPerformer.drag(to: point, returningTo: clickPerformer.currentCursor())
         }
     }
 
@@ -244,12 +292,15 @@ extension AppDelegate: HIDMouseMonitorDelegate {
         guard button == .left else {
             // Right button: no drag, macOS has no second button state to spare anyway.
             if !isPressed, !mainButtonGuard.isMainButtonDown, !blueDragStarted {
-                clickPerformer.performRightClick(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
+                rememberFrontApp()
+                defer { restoreFrontApp() }
+                clickPerformer.performRightClick(at: overlay.secondaryPointerPosition, returningTo: clickPerformer.currentCursor())
                 overlay.pulseSecondary()
             }
             return
         }
 
+        debugLog("blue button \(button) pressed=\(isPressed) pos=\(overlay.secondaryPointerPosition) mainDown=\(mainButtonGuard.isMainButtonDown) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")")
         guard isPressed != blueButtonIsDown else {
             return
         }
@@ -259,6 +310,7 @@ extension AppDelegate: HIDMouseMonitorDelegate {
             blueDragStarted = false
             // A blue press while the main button is held would join the main click or drag.
             blueIgnoringPress = mainButtonGuard.isMainButtonDown
+            rememberFrontApp()
             bluePressPosition = overlay.secondaryPointerPosition
             return
         }
@@ -270,13 +322,14 @@ extension AppDelegate: HIDMouseMonitorDelegate {
         }
 
         if blueDragStarted {
-            clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
+            clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: clickPerformer.currentCursor())
             mainButtonGuard.blocksMainButtons = false
         } else {
-            clickPerformer.performClick(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
+            clickPerformer.performClick(at: overlay.secondaryPointerPosition, returningTo: clickPerformer.currentCursor())
         }
         blueDragStarted = false
         overlay.pulseSecondary()
+        restoreFrontApp()
     }
 
     func mouseMonitorDevicesChanged(_ monitor: HIDMouseMonitor) {
