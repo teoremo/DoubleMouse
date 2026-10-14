@@ -16,6 +16,7 @@ private let pressableRoles: Set<String> = [
 
 final class ClickPerformer {
     private let source = CGEventSource(stateID: .privateState)
+    var mainGuard: MainButtonGuard?
 
     init() {
         source?.localEventsSuppressionInterval = 0
@@ -70,8 +71,9 @@ final class ClickPerformer {
         }
 
         event.location = quartzPoint(fromAppKitPoint: point)
+        mainGuard?.noteBlueActivity()
         event.post(tap: .cghidEventTap)
-        moveSystemCursor(to: returnPoint)
+        restoreMainCursor(fallback: returnPoint)
     }
 
     /// The real cursor in AppKit coordinates. NSEvent.mouseLocation lags behind the window
@@ -89,6 +91,23 @@ final class ClickPerformer {
             }
         }
         return NSEvent.mouseLocation
+    }
+
+    /// Posted events reach the window server after this returns, and each one drags the
+    /// cursor to the blue pointer. Warp now, then again once they have landed.
+    private func restoreMainCursor(fallback: CGPoint) {
+        func warp() {
+            if let target = mainGuard?.mainLocation {
+                CGWarpMouseCursorPosition(target)
+                CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
+            } else {
+                moveSystemCursor(to: fallback)
+            }
+        }
+        warp()
+        for delay in [0.015, 0.05, 0.12] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { warp() }
+        }
     }
 
     func moveSystemCursor(to point: CGPoint) {
@@ -126,10 +145,11 @@ final class ClickPerformer {
             mouseButton: button
         )
         event?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+        mainGuard?.noteBlueActivity()
         event?.post(tap: .cghidEventTap)
 
         if let returnPoint {
-            moveSystemCursor(to: returnPoint)
+            restoreMainCursor(fallback: returnPoint)
         }
     }
 

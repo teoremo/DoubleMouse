@@ -32,6 +32,60 @@ private let modifierFlags: [Int: CGEventFlags] = [
     0xE3: .maskCommand, 0xE7: .maskCommand
 ]
 
+/// Character a menu item shows for its Command shortcut, for the keys worth matching.
+private func menuCharacter(forUsage usage: Int) -> String? {
+    switch usage {
+    case 0x04...0x1D: return String(UnicodeScalar(UInt8(65 + usage - 0x04)))
+    case 0x1E...0x26: return String(usage - 0x1E + 1)
+    case 0x27: return "0"
+    case 0x2D: return "-"
+    case 0x2E: return "="
+    case 0x2F: return "["
+    case 0x30: return "]"
+    case 0x31: return "\\"
+    case 0x33: return ";"
+    case 0x34: return "'"
+    case 0x35: return "`"
+    case 0x36: return ","
+    case 0x37: return "."
+    case 0x38: return "/"
+    default: return nil
+    }
+}
+
+private func axValue(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
+}
+
+/// Menu key equivalents only fire in the frontmost app, so a Command shortcut aimed at a
+/// background app is performed by pressing the matching menu item through Accessibility.
+private func pressMenuItem(pid: pid_t, character: String, modifiers: Int) -> Bool {
+    guard AXIsProcessTrusted(),
+          let bar = axValue(AXUIElementCreateApplication(pid), kAXMenuBarAttribute as String) else {
+        return false
+    }
+
+    func search(_ element: AXUIElement, depth: Int) -> Bool {
+        guard depth < 7,
+              let children = axValue(element, kAXChildrenAttribute as String) as? [AXUIElement] else {
+            return false
+        }
+        for child in children {
+            if (axValue(child, kAXRoleAttribute as String) as? String) == kAXMenuItemRole as String,
+               let char = axValue(child, kAXMenuItemCmdCharAttribute as String) as? String,
+               char.uppercased() == character,
+               (axValue(child, kAXMenuItemCmdModifiersAttribute as String) as? Int ?? 0) == modifiers,
+               (axValue(child, kAXEnabledAttribute as String) as? Bool) != false {
+                return AXUIElementPerformAction(child, kAXPressAction as CFString) == .success
+            }
+            if search(child, depth: depth + 1) { return true }
+        }
+        return false
+    }
+    return search(bar as! AXUIElement, depth: 0)
+}
+
 struct HIDKeyboard {
     let id: UInt64
     let name: String
@@ -39,8 +93,12 @@ struct HIDKeyboard {
     let reference: IOHIDDevice
 }
 
-/// Takes exclusive ownership of one keyboard and replays its keystrokes into the app the
-/// blue pointer last clicked, while the other keyboard keeps typing into the frontmost app.
+/// Replays one keyboard's keystrokes into the app the blue pointer last clicked, while the
+/// other keyboard keeps typing into the frontmost app.
+///
+/// macOS only lets root seize a keyboard (IOHIDDeviceOpen fails with kIOReturnNotPrivileged),
+/// so the keyboard still reaches the system. Instead, every key the HID layer reports from
+/// the selected keyboard is remembered, and an event tap drops the matching system event.
 final class KeyboardRouter {
     var onChange: (() -> Void)?
 
@@ -50,7 +108,10 @@ final class KeyboardRouter {
     private var manager: IOHIDManager!
     private var keyboards: [UInt64: HIDKeyboard] = [:]
     private var selectedID: UInt64?
-    private var seizedID: UInt64?
+    private var tap: CFMachPort?
+    private var pendingDown: [CGKeyCode: Date] = [:]
+    private var pendingUp: [CGKeyCode: Date] = [:]
+    private let suppressWindow: TimeInterval = 0.25
     private var flags = CGEventFlags()
     private var held = Set<Int>()
     private var repeatTimer: Timer?
@@ -61,7 +122,6 @@ final class KeyboardRouter {
     }
 
     var selectedKeyboardID: UInt64? { selectedID }
-    var isSeized: Bool { selectedID != nil && seizedID == selectedID }
 
     func start() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(0x8))
@@ -79,6 +139,72 @@ final class KeyboardRouter {
         }, context)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        startSuppressionTap()
+    }
+
+    private func startSuppressionTap() {
+        let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged]
+        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, context in
+                guard let context else { return Unmanaged.passUnretained(event) }
+                let router = Unmanaged<KeyboardRouter>.fromOpaque(context).takeUnretainedValue()
+                return router.filter(type: type, event: event) ? Unmanaged.passUnretained(event) : nil
+            },
+            userInfo: context
+        ) else {
+            debugLog("keyboard tap unavailable (needs Accessibility)")
+            return
+        }
+        self.tap = tap
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0), .commonModes)
+    }
+
+    /// Returns false to drop a system event that came from the secondary keyboard.
+    private func filter(type: CGEventType, event: CGEvent) -> Bool {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return true
+        }
+        guard selectedID != nil,
+              event.getIntegerValueField(.eventSourceUserData) != syntheticEventMarker else {
+            return true
+        }
+
+        let code = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let now = Date()
+        let isHeld = held.contains { keyCodes[$0] == code }
+
+        switch type {
+        case .keyDown:
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return !isHeld
+            }
+            if let expiry = pendingDown[code], expiry > now {
+                pendingDown[code] = nil
+                return false
+            }
+        case .keyUp:
+            if let expiry = pendingUp[code], expiry > now {
+                pendingUp[code] = nil
+                return false
+            }
+        default: // flagsChanged: modifiers report press and release the same way.
+            if let expiry = pendingDown[code], expiry > now {
+                pendingDown[code] = nil
+                return false
+            }
+            if let expiry = pendingUp[code], expiry > now {
+                pendingUp[code] = nil
+                return false
+            }
+        }
+        return true
     }
 
     func stop() {
@@ -86,7 +212,6 @@ final class KeyboardRouter {
         for keyboard in keyboards.values {
             IOHIDDeviceClose(keyboard.reference, IOOptionBits(kIOHIDOptionsTypeNone))
         }
-        seizedID = nil
     }
 
     /// nil stops routing and gives the keyboard back to macOS.
@@ -98,7 +223,6 @@ final class KeyboardRouter {
         } else {
             UserDefaults.standard.removeObject(forKey: keyboardDefaultsKey)
         }
-        updateSeizure()
         onChange?()
     }
 
@@ -149,7 +273,6 @@ final class KeyboardRouter {
         if key == UserDefaults.standard.string(forKey: keyboardDefaultsKey) {
             selectedID = id
         }
-        updateSeizure()
         onChange?()
     }
 
@@ -158,32 +281,11 @@ final class KeyboardRouter {
         IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(device), &id)
         IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         keyboards.removeValue(forKey: id)
-        if seizedID == id {
+        if selectedID == id {
             releaseAllKeys()
-            seizedID = nil
+            selectedID = nil
         }
-        if selectedID == id { selectedID = nil }
         onChange?()
-    }
-
-    private func updateSeizure() {
-        guard seizedID != selectedID else { return }
-
-        if let seizedID, let old = keyboards[seizedID]?.reference {
-            IOHIDDeviceClose(old, IOOptionBits(kIOHIDOptionsTypeNone))
-            IOHIDDeviceOpen(old, IOOptionBits(kIOHIDOptionsTypeNone))
-            self.seizedID = nil
-        }
-        guard let selectedID, let device = keyboards[selectedID]?.reference else { return }
-
-        IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
-        let result = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeSeizeDevice))
-        debugLog("keyboard seize id=\(selectedID) result=\(String(format: "0x%08x", result))")
-        if result == kIOReturnSuccess {
-            seizedID = selectedID
-        } else {
-            IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
-        }
     }
 
     private func input(_ value: IOHIDValue) {
@@ -192,36 +294,59 @@ final class KeyboardRouter {
 
         var id: UInt64 = 0
         IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(IOHIDElementGetDevice(element)), &id)
-        guard id == selectedID, isSeized else { return }
+        guard id == selectedID else { return }
 
         let usage = Int(IOHIDElementGetUsage(element))
         guard keyCodes[usage] != nil else { return }
         let isDown = IOHIDValueGetIntegerValue(value) != 0
+        let expiry = Date().addingTimeInterval(suppressWindow)
 
         if isDown {
             guard held.insert(usage).inserted else { return }
+            pendingDown[keyCodes[usage]!] = expiry
             if let flag = modifierFlags[usage] { flags.insert(flag) }
             post(usage: usage, isDown: true)
             scheduleRepeat(for: usage)
         } else {
             guard held.remove(usage) != nil else { return }
+            pendingUp[keyCodes[usage]!] = expiry
             if let flag = modifierFlags[usage] { flags.remove(flag) }
             post(usage: usage, isDown: false)
             repeatTimer?.invalidate()
         }
     }
 
+    private var menuHandled = Set<Int>()
+
     private func post(usage: Int, isDown: Bool) {
         guard let code = keyCodes[usage], let app = targetApp, !app.isTerminated else { return }
+
+        if modifierFlags[usage] == nil {
+            if isDown, flags.contains(.maskCommand), let character = menuCharacter(forUsage: usage) {
+                var modifiers = 0
+                if flags.contains(.maskShift) { modifiers |= 1 }
+                if flags.contains(.maskAlternate) { modifiers |= 2 }
+                if flags.contains(.maskControl) { modifiers |= 4 }
+                if pressMenuItem(pid: app.processIdentifier, character: character, modifiers: modifiers) {
+                    debugLog("menu shortcut \(character) mods=\(modifiers) -> \(app.localizedName ?? "?")")
+                    menuHandled.insert(usage)
+                    return
+                }
+            } else if !isDown, menuHandled.remove(usage) != nil {
+                return
+            }
+        }
+
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: isDown) else { return }
         event.flags = flags
+        event.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
         event.postToPid(app.processIdentifier)
     }
 
     // HID keyboards do not auto-repeat; macOS does that for the keyboards it owns.
     private func scheduleRepeat(for usage: Int) {
         repeatTimer?.invalidate()
-        guard modifierFlags[usage] == nil else { return }
+        guard modifierFlags[usage] == nil, !flags.contains(.maskCommand) else { return }
         repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self, self.held.contains(usage) else { return }
             self.repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] timer in

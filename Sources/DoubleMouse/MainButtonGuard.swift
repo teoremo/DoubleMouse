@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// Tag stamped on every event DoubleMouse posts, so the guard can tell blue-pointer
 /// events from the main device's real ones.
@@ -15,10 +16,22 @@ final class MainButtonGuard {
     private var droppedButtons = Set<CGMouseButton>()
     private var tap: CFMachPort?
 
+    /// Where the main cursor should be, in Quartz coordinates. While a blue click is in
+    /// flight the window server's own cursor position is unreliable, so movement is
+    /// integrated from the main device's deltas instead.
+    private(set) var mainLocation = CGEvent(source: nil)?.location
+    private var blueActivityUntil = Date.distantPast
+
     var isMainButtonDown: Bool { !downButtons.isEmpty }
 
+    /// Call before posting synthetic events that move the real cursor.
+    func noteBlueActivity() {
+        blueActivityUntil = Date().addingTimeInterval(0.25)
+    }
+
     func start() {
-        let types: [CGEventType] = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp]
+        let types: [CGEventType] = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+                                    .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let context = Unmanaged.passUnretained(self).toOpaque()
 
@@ -50,6 +63,21 @@ final class MainButtonGuard {
 
         guard event.getIntegerValueField(.eventSourceUserData) != syntheticEventMarker else {
             return Unmanaged.passUnretained(event)
+        }
+
+        switch type {
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            if Date() < blueActivityUntil, let current = mainLocation {
+                mainLocation = CGPoint(
+                    x: current.x + event.getDoubleValueField(.mouseEventDeltaX),
+                    y: current.y + event.getDoubleValueField(.mouseEventDeltaY)
+                )
+            } else {
+                mainLocation = event.location
+            }
+            return Unmanaged.passUnretained(event)
+        default:
+            break
         }
 
         let button: CGMouseButton = (type == .leftMouseDown || type == .leftMouseUp) ? .left : .right

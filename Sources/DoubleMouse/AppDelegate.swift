@@ -13,6 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var blueIgnoringPress = false
     private var moveLogCount = 0
     private var appToRestore: NSRunningApplication?
+    /// The app the main keyboard is typing into: the last app activated by anything other
+    /// than a blue click.
+    private var mainFocusApp = NSWorkspace.shared.frontmostApplication
+    /// Activations before this time are blue-click side effects, not the user switching apps.
+    private var blueFocusGuardUntil = Date.distantPast
 
     private var keepFocus = UserDefaults.standard.object(forKey: "keepFocus") as? Bool ?? false {
         didSet { UserDefaults.standard.set(keepFocus, forKey: "keepFocus") }
@@ -26,9 +31,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "cursorarrow.motionlines", accessibilityDescription: "DoubleMouse")
 
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, Date() >= self.blueFocusGuardUntil,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            self.mainFocusApp = app
+        }
+
         overlay.show()
         hidMonitor.start()
         mainButtonGuard.start()
+        clickPerformer.mainGuard = mainButtonGuard
         keyboardRouter.onChange = { [weak self] in self?.rebuildMenu() }
         keyboardRouter.start()
         showAccessibilityWarningIfNeeded()
@@ -230,13 +247,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// A click activates the app under the blue pointer, which sends the keyboard there.
     /// Remember the app being typed into and bring it back once the click has landed.
+    /// With a secondary keyboard the main keyboard must stay in its own app, so a blue click
+    /// may not take focus no matter what the menu option says.
+    private var shouldKeepFocus: Bool {
+        keepFocus || keyboardRouter.selectedKeyboardID != nil
+    }
+
     private func rememberFrontApp() {
-        guard keepFocus, !isInMenuBar(overlay.secondaryPointerPosition) else {
+        guard shouldKeepFocus, !isInMenuBar(overlay.secondaryPointerPosition) else {
             appToRestore = nil
             return
         }
-        let front = NSWorkspace.shared.frontmostApplication
-        appToRestore = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+        blueFocusGuardUntil = Date().addingTimeInterval(1.0)
+        appToRestore = mainFocusApp
     }
 
     /// Menu bar clicks open menus, and re-activating another app would dismiss them.
@@ -246,14 +269,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func restoreFrontApp() {
-        guard keepFocus, let app = appToRestore else { return }
+        guard let app = appToRestore else { return }
+        blueFocusGuardUntil = Date().addingTimeInterval(1.0)
         appToRestore = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            guard NSWorkspace.shared.frontmostApplication != app, !app.isTerminated else { return }
-            let element = AXUIElementCreateApplication(app.processIdentifier)
-            let result = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-            debugLog("restore focus to \(app.localizedName ?? "?") result=\(result.rawValue)")
+
+        // The target app activates asynchronously, so check twice before letting go.
+        func restore(attempt: Int) {
+            if !app.isTerminated, NSWorkspace.shared.frontmostApplication != app {
+                let element = AXUIElementCreateApplication(app.processIdentifier)
+                let result = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                if result != .success {
+                    app.activate()
+                }
+                debugLog("restore focus to \(app.localizedName ?? "?") attempt=\(attempt) result=\(result.rawValue)")
+            }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { restore(attempt: 1) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { restore(attempt: 2) }
     }
 
     @objc private func toggleAcceleration() {
@@ -356,6 +388,7 @@ extension AppDelegate: HIDMouseMonitorDelegate {
         if blueIgnoringPress || (!blueDragStarted && mainButtonGuard.isMainButtonDown) {
             blueIgnoringPress = false
             blueDragStarted = false
+            restoreFrontApp()
             return
         }
 
