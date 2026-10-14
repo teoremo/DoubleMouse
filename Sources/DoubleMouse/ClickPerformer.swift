@@ -97,12 +97,14 @@ final class ClickPerformer {
     }
 
     private func postMouseEvent(_ type: CGEventType, button: CGMouseButton, at point: CGPoint, returningTo returnPoint: CGPoint? = nil) {
-        CGEvent(
+        let event = CGEvent(
             mouseEventSource: source,
             mouseType: type,
             mouseCursorPosition: quartzPoint(fromAppKitPoint: point),
             mouseButton: button
-        )?.post(tap: .cghidEventTap)
+        )
+        event?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+        event?.post(tap: .cghidEventTap)
 
         if let returnPoint {
             moveSystemCursor(to: returnPoint)

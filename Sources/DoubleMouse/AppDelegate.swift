@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let clickPerformer = ClickPerformer()
     private lazy var hidMonitor = HIDMouseMonitor(delegate: self)
 
+    private let mainButtonGuard = MainButtonGuard()
+    private var blueIgnoringPress = false
     private var didShowAccessibilityWarning = false
     private var blueButtonIsDown = false
     private var blueDragStarted = false
@@ -19,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         overlay.show()
         hidMonitor.start()
+        mainButtonGuard.start()
         showAccessibilityWarningIfNeeded()
         rebuildMenu()
     }
@@ -27,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if blueDragStarted {
             clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
         }
+        mainButtonGuard.blocksMainButtons = false
         hidMonitor.stop()
     }
 
@@ -216,14 +220,15 @@ extension AppDelegate: HIDMouseMonitorDelegate {
     func mouseMonitor(_ monitor: HIDMouseMonitor, didMoveSecondaryBy delta: CGPoint) {
         overlay.moveSecondaryBy(delta)
 
-        guard blueButtonIsDown else {
+        guard blueButtonIsDown, !blueIgnoringPress else {
             return
         }
 
         let point = overlay.secondaryPointerPosition
-        if !blueDragStarted,
+        if !blueDragStarted, !blueIgnoringPress,
            hypot(point.x - bluePressPosition.x, point.y - bluePressPosition.y) >= 3 {
             blueDragStarted = true
+            mainButtonGuard.blocksMainButtons = true
             clickPerformer.beginDrag(at: bluePressPosition, returningTo: NSEvent.mouseLocation)
         }
         if blueDragStarted {
@@ -238,7 +243,7 @@ extension AppDelegate: HIDMouseMonitorDelegate {
     func mouseMonitor(_ monitor: HIDMouseMonitor, didChangeSecondaryButton button: MouseButton, isPressed: Bool) {
         guard button == .left else {
             // Right button: no drag, macOS has no second button state to spare anyway.
-            if !isPressed {
+            if !isPressed, !mainButtonGuard.isMainButtonDown, !blueDragStarted {
                 clickPerformer.performRightClick(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
                 overlay.pulseSecondary()
             }
@@ -252,12 +257,21 @@ extension AppDelegate: HIDMouseMonitorDelegate {
         blueButtonIsDown = isPressed
         if isPressed {
             blueDragStarted = false
+            // A blue press while the main button is held would join the main click or drag.
+            blueIgnoringPress = mainButtonGuard.isMainButtonDown
             bluePressPosition = overlay.secondaryPointerPosition
+            return
+        }
+
+        if blueIgnoringPress || (!blueDragStarted && mainButtonGuard.isMainButtonDown) {
+            blueIgnoringPress = false
+            blueDragStarted = false
             return
         }
 
         if blueDragStarted {
             clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
+            mainButtonGuard.blocksMainButtons = false
         } else {
             clickPerformer.performClick(at: overlay.secondaryPointerPosition, returningTo: NSEvent.mouseLocation)
         }
