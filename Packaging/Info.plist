@@ -11,7 +11,7 @@
     <key>CFBundleIconFile</key>
     <string>DoubleMouse.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>com.franxc.doublemouse</string>
+    <string>com.teoremo.doublemouse</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

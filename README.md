@@ -4,25 +4,28 @@
   <img src="Assets/DoubleMouse.png" alt="DoubleMouse icon" width="180">
 </p>
 
+> This is a personal fork of [franciscoxc/DoubleMouse](https://github.com/franciscoxc/DoubleMouse) with a fix for the blue pointer never moving, a second keyboard, and a customisable pointer. See the [changelog](CHANGELOG.md) for what differs.
+
 Ever wondered how to be faster on your Mac? What if you had two physical mice, each with its own pointer?
 
 **DoubleMouse** is an open-source macOS menu bar app for two pointing devices: two physical mice, or your MacBook's built-in trackpad plus one external mouse. Both pointers move simultaneously, and each can click, scroll, and drag. It is also handy in classrooms and support sessions, where teacher and student can each keep a hand on the computer without negotiating custody of the cursor.
 
 ## Download
 
-- [Download DoubleMouse 1.2.2 for macOS from GitHub](https://github.com/franciscoxc/DoubleMouse/releases/download/v1.2.2/DoubleMouse-1.2.2.dmg)
-- [Download mirror and project page](https://apps.franxc.com/doublemouse/)
+Build the DMG yourself (see [Build The DMG](#build-the-dmg)); this fork publishes no binaries. The original project's signed and notarized builds are on [its releases page](https://github.com/franciscoxc/DoubleMouse/releases).
 
-The app requires two pointing devices: two physical mice, or the built-in MacBook trackpad plus one external mouse. The downloadable build supports Apple Silicon and Intel Macs running macOS 13 or later.
+The app requires two pointing devices: two physical mice, or the built-in MacBook trackpad plus one external mouse. It supports Apple Silicon and Intel Macs running macOS 13 or later.
 
 ## Install
 
-1. Open the DMG and drag DoubleMouse to Applications.
-2. Launch DoubleMouse and grant Accessibility permission when macOS asks.
-3. If the blue pointer does not react, also enable DoubleMouse under System Settings > Privacy & Security > Input Monitoring.
-4. Use `Set Blue Pointer From Next Movement` from the menu bar when you need to assign a different device.
+1. Open the DMG and drag DoubleMouse to Applications. Quit any other copy of DoubleMouse first.
+2. Launch DoubleMouse. A build you made yourself is not notarized, so macOS may ask you to approve the first launch: right-click the app and choose Open.
+3. Grant **both** permissions under System Settings > Privacy & Security:
+   - **Input Monitoring**, which lets the app read the second device. Without it the blue pointer never moves.
+   - **Accessibility**, which lets the app click, press controls, and filter the second keyboard.
+4. Pick the blue device from the menu bar if it guessed wrong: `Blue Pointer Mouse`, `Main Pointer Device`, `Swap Pointers`, or `Set Blue Pointer From Next Movement`.
 
-The published DMG is signed with a Developer ID and notarized by Apple, so it opens without a Gatekeeper prompt. You still have to grant Accessibility, and on some Macs Input Monitoring, because that is what the app needs to do its job.
+The permissions belong to the signature of the app. If you rebuild with a different signing identity, grant them again.
 
 ## Features
 
@@ -34,12 +37,19 @@ The published DMG is signed with a Developer ID and notarized by Apple, so it op
 - The chosen blue device is remembered between launches.
 - External USB and Bluetooth mouse support.
 - MacBook trackpad plus external mouse support when macOS exposes both HID devices.
-- Compact menu bar device selection.
+- Compact menu bar device selection, from either side: choose the blue device, the main device, or swap them.
+- A **secondary keyboard**: pick a second keyboard and its keystrokes go to the app you last clicked with the blue pointer, while the other keyboard keeps typing into the frontmost app.
+- **Pointer appearance**: color presets plus a color picker, standard or mirrored arrow, five sizes, and a fading trail. The arrow has a contrasting border and a shadow, white on dark colors and black on light ones.
+- Clicks on one pointer do not disturb the other: a blue click is ignored while the main button is held, and the main cursor is put back where it was.
+- Slow speeds down to 0.1×, for large displays.
+- Works across displays of different sizes and layouts.
 - No analytics, accounts, network access, or kernel extension.
 
 ## How It Works
 
 DoubleMouse opens HID devices independently and takes exclusive user-space ownership of the selected blue-pointer device. macOS continues to own the normal cursor, while DoubleMouse draws the blue pointer and emits its actions at the correct screen coordinates.
+
+For the second keyboard, macOS only lets root capture a keyboard exclusively. DoubleMouse instead listens to the selected keyboard over HID, drops the matching system keystroke with an event tap, and sends the keystroke straight to the target app's process. Command shortcuts such as copy and paste are performed through the target app's menu, because menu shortcuts only fire in the frontmost app.
 
 The implementation uses public AppKit, IOKit, Accessibility, and CoreGraphics APIs. It does not install a driver or system extension.
 
@@ -47,6 +57,8 @@ The implementation uses public AppKit, IOKit, Accessibility, and CoreGraphics AP
 
 - macOS still has one global mouse-button state, so two simultaneous drag operations are not supported.
 - The blue pointer does not trigger hover: buttons do not highlight under it, tooltips do not appear, and submenus do not open. macOS keeps a single cursor position, so putting the real cursor on the blue pointer and bringing it back on every movement would leave the real one jittering constantly. Clicking, scrolling, and dragging are unaffected.
+- The second keyboard targets an app, not a window, so two windows of one app cannot be split. Some apps ignore keystrokes while inactive, and keys macOS handles globally (Cmd+Tab, Spotlight, brightness and volume) are not routed. Pressing the same key on both keyboards within about a quarter of a second can drop one press.
+- With a secondary keyboard selected, a blue click hands focus straight back to the app the main keyboard is using. To type into the app you clicked, use the secondary keyboard.
 - Some games, remote desktops, canvases, or custom controls may reject synthetic pointer events.
 - The blue device is remembered by USB/Bluetooth port, so moving a mouse to a different port clears the selection.
 
@@ -64,13 +76,15 @@ swift run DoubleMouse --selftest
 
 When running from Terminal, macOS assigns the relevant privacy permissions to Terminal. The packaged app requests them as DoubleMouse.
 
+Set `DOUBLEMOUSE_DEBUG=1` to log the detected devices, whether each could be opened, per-device report rates and input events to stderr. A device that fails to open with `0xe00002e2` is missing Input Monitoring.
+
 ## Build The DMG
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/package-release.sh 1.2.2
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/package-release.sh 1.3.0
 ```
 
-The script uses only native macOS tools and writes the DMG plus SHA-256 checksum to `dist/`. Without arguments it signs ad hoc, which needs no certificate but leaves the first launch behind a Gatekeeper warning.
+The script uses only native macOS tools and writes the DMG plus SHA-256 checksum to `dist/`. Without arguments it signs ad hoc, which needs no certificate but leaves the first launch behind a Gatekeeper warning and makes macOS ask for the permissions again after every rebuild. Setting `CODESIGN_IDENTITY` to an Apple Development certificate (`security find-identity -v -p codesigning`) keeps a stable signature.
 
 ## Notarize The DMG
 
