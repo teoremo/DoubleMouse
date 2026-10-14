@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0 - 2026-10-14
+
+Fork changes.
+
+- Fixed the blue pointer never moving on a Mac without Input Monitoring: the app now requests it at launch and offers a menu item when it is missing. Previously every device open failed with `kIOReturnNotPermitted`.
+- Added a secondary keyboard that types into the app last clicked with the blue pointer, with a keyboard picker, modifiers, key repeat, and Command shortcuts performed through the target app's menu.
+- Added pointer appearance settings: color presets and picker, shape, size, and a fading trail, with a contrasting border and a shadow.
+- Added `Main Pointer Device`, `Swap Pointers` and slower speeds (0.1× to 0.4×).
+- Blue and main clicks no longer interfere: blue presses are ignored while the main button is held, real main presses are swallowed during a blue drag, and the main cursor is restored reliably after quick blue clicks.
+- Fixed the main pointer freezing for a quarter second after each cursor warp.
+- Fixed the blue pointer freezing while a menu is open.
+- Fixed the pointer stopping short on displays of different sizes: one overlay window per display, and the pointer stays on real screen area.
+- Fixed duplicated input from one device matching several HID usages.
+- Added `DOUBLEMOUSE_DEBUG=1` logging.
+- Changed the bundle identifier to `com.teoremo.doublemouse`, so permissions are separate from the original app.
+
 ## 1.2.2 - 2026-07-29
 
 - The published DMG is now signed with a Developer ID and notarized by Apple, so macOS no longer asks you to approve the first launch.
