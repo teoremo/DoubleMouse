@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let clickPerformer = ClickPerformer()
     private lazy var hidMonitor = HIDMouseMonitor(delegate: self)
 
+    private let keyboardRouter = KeyboardRouter()
     private let mainButtonGuard = MainButtonGuard()
     private var blueIgnoringPress = false
     private var moveLogCount = 0
@@ -28,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlay.show()
         hidMonitor.start()
         mainButtonGuard.start()
+        keyboardRouter.onChange = { [weak self] in self?.rebuildMenu() }
+        keyboardRouter.start()
         showAccessibilityWarningIfNeeded()
         rebuildMenu()
     }
@@ -37,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             clickPerformer.endDrag(at: overlay.secondaryPointerPosition, returningTo: clickPerformer.currentCursor())
         }
         mainButtonGuard.blocksMainButtons = false
+        keyboardRouter.stop()
         hidMonitor.stop()
     }
 
@@ -50,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let devices = NSMenuItem(title: "Blue Pointer Mouse", action: nil, keyEquivalent: "")
         devices.submenu = deviceSubmenu()
         menu.addItem(devices)
+
+        let keyboard = NSMenuItem(title: "Secondary Keyboard", action: nil, keyEquivalent: "")
+        keyboard.submenu = keyboardSubmenu()
+        menu.addItem(keyboard)
 
         let swap = NSMenuItem(title: "Swap Pointers", action: #selector(swapPointers), keyEquivalent: "")
         swap.target = self
@@ -83,6 +91,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(focusItem)
 
         menu.addItem(.separator())
+
+        if keyboardRouter.selectedKeyboardID != nil {
+            let typing = NSMenuItem(title: "Keyboard Types Into: \(keyboardRouter.targetApp?.localizedName ?? "click with the blue pointer first")", action: nil, keyEquivalent: "")
+            typing.isEnabled = false
+            menu.addItem(typing)
+        }
 
         let secondary = hidMonitor.secondaryDeviceName ?? "not selected"
         let capture = hidMonitor.isSecondaryDeviceSeized ? "exclusive" : "shared"
@@ -146,6 +160,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             submenu.addItem(item)
         }
         return submenu
+    }
+
+    private func keyboardSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+
+        let none = NSMenuItem(title: "None", action: #selector(selectKeyboard(_:)), keyEquivalent: "")
+        none.target = self
+        none.state = keyboardRouter.selectedKeyboardID == nil ? .on : .off
+        submenu.addItem(none)
+        submenu.addItem(.separator())
+
+        for keyboard in keyboardRouter.allKeyboards {
+            let item = NSMenuItem(title: keyboard.name, action: #selector(selectKeyboard(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = keyboard.id
+            item.state = keyboard.id == keyboardRouter.selectedKeyboardID ? .on : .off
+            submenu.addItem(item)
+        }
+        return submenu
+    }
+
+    @objc private func selectKeyboard(_ sender: NSMenuItem) {
+        keyboardRouter.select(id: sender.representedObject as? UInt64)
     }
 
     private func speedSubmenu() -> NSMenu {
@@ -311,6 +348,7 @@ extension AppDelegate: HIDMouseMonitorDelegate {
             // A blue press while the main button is held would join the main click or drag.
             blueIgnoringPress = mainButtonGuard.isMainButtonDown
             rememberFrontApp()
+            keyboardRouter.setTarget(atQuartzPoint: clickPerformer.quartzPoint(fromAppKitPoint: overlay.secondaryPointerPosition))
             bluePressPosition = overlay.secondaryPointerPosition
             return
         }

@@ -133,7 +133,7 @@ final class ClickPerformer {
         }
     }
 
-    private func quartzPoint(fromAppKitPoint point: CGPoint) -> CGPoint {
+    func quartzPoint(fromAppKitPoint point: CGPoint) -> CGPoint {
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }),
            let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
             let displayBounds = CGDisplayBounds(CGDirectDisplayID(screenNumber.uint32Value))
