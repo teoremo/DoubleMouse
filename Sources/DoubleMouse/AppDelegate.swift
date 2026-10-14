@@ -76,6 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyboard.submenu = keyboardSubmenu()
         menu.addItem(keyboard)
 
+        let appearance = NSMenuItem(title: "Pointer Appearance", action: nil, keyEquivalent: "")
+        appearance.submenu = appearanceSubmenu()
+        menu.addItem(appearance)
+
         let swap = NSMenuItem(title: "Swap Pointers", action: #selector(swapPointers), keyEquivalent: "")
         swap.target = self
         swap.isEnabled = hidMonitor.allDevices.count == 2
@@ -177,6 +181,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             submenu.addItem(item)
         }
         return submenu
+    }
+
+    private static func rgb(_ hex: Int) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+
+    private static let colorPresets: [(name: String, color: NSColor)] = [
+        ("Ocean", rgb(0x1E88FF)), ("Coral", rgb(0xFF4D4F)), ("Emerald", rgb(0x1FBF75)), ("Amber", rgb(0xFFB300)),
+        ("Violet", rgb(0x8E5CF6)), ("Hot Pink", rgb(0xFF3D9A)), ("Cyan", rgb(0x00C2D8)), ("Lime", rgb(0xA6E22E)),
+        ("Black", rgb(0x000000)), ("White", rgb(0xFFFFFF))
+    ]
+
+    private func appearanceSubmenu() -> NSMenu {
+        let menu = NSMenu()
+        let style = overlay.style
+
+        func parent(_ title: String, _ items: [NSMenuItem]) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            items.forEach(sub.addItem)
+            item.submenu = sub
+            menu.addItem(item)
+        }
+
+        func option(_ title: String, value: Any, selected: Bool, action: Selector) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = value
+            item.state = selected ? .on : .off
+            return item
+        }
+
+        var colors = Self.colorPresets.map { preset -> NSMenuItem in
+            let selected = Self.sameColor(style.color, preset.color)
+            let item = option(preset.name, value: preset.color, selected: selected, action: #selector(selectPointerColor(_:)))
+            item.image = PointerArt.preview(color: preset.color)
+            return item
+        }
+        colors.append(.separator())
+        let custom = NSMenuItem(title: "Custom…", action: #selector(chooseCustomColor), keyEquivalent: "")
+        custom.target = self
+        colors.append(custom)
+        parent("Color", colors)
+
+        parent("Shape", [
+            option("Standard Arrow", value: false, selected: !style.mirrored, action: #selector(selectPointerShape(_:))),
+            option("Mirrored Arrow", value: true, selected: style.mirrored, action: #selector(selectPointerShape(_:)))
+        ].enumerated().map { index, item in
+            item.image = PointerArt.preview(color: style.color, mirrored: index == 1)
+            return item
+        })
+
+        parent("Size", [("Small", 0.75), ("Normal", 1.0), ("Large", 1.5), ("Extra Large", 2.0), ("Huge", 3.0)].map { name, scale in
+            option(name, value: scale, selected: abs(Double(style.scale) - scale) < 0.001, action: #selector(selectPointerSize(_:)))
+        })
+
+        parent("Trail", [("Off", 0.0), ("Short", 0.25), ("Medium", 0.6), ("Long", 1.2)].map { name, seconds in
+            option(name, value: seconds, selected: abs(style.trail - seconds) < 0.001, action: #selector(selectPointerTrail(_:)))
+        })
+
+        return menu
+    }
+
+    private static func sameColor(_ a: NSColor, _ b: NSColor) -> Bool {
+        guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        let difference = abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent)
+        return difference < 0.01
+    }
+
+    @objc private func selectPointerColor(_ sender: NSMenuItem) {
+        guard let color = sender.representedObject as? NSColor else { return }
+        overlay.style.color = color
+        rebuildMenu()
+    }
+
+    @objc private func chooseCustomColor() {
+        let panel = NSColorPanel.shared
+        panel.color = overlay.style.color
+        panel.showsAlpha = false
+        panel.setTarget(self)
+        panel.setAction(#selector(customColorChanged(_:)))
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func customColorChanged(_ sender: NSColorPanel) {
+        overlay.style.color = sender.color
+        rebuildMenu()
+    }
+
+    @objc private func selectPointerShape(_ sender: NSMenuItem) {
+        guard let mirrored = sender.representedObject as? Bool else { return }
+        overlay.style.mirrored = mirrored
+        rebuildMenu()
+    }
+
+    @objc private func selectPointerSize(_ sender: NSMenuItem) {
+        guard let scale = sender.representedObject as? Double else { return }
+        overlay.style.scale = CGFloat(scale)
+        rebuildMenu()
+    }
+
+    @objc private func selectPointerTrail(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Double else { return }
+        overlay.style.trail = seconds
+        rebuildMenu()
     }
 
     private func keyboardSubmenu() -> NSMenu {
