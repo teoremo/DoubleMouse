@@ -33,9 +33,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         let menu = NSMenu()
 
+        let main = NSMenuItem(title: "Main Pointer Device", action: nil, keyEquivalent: "")
+        main.submenu = mainDeviceSubmenu()
+        menu.addItem(main)
+
         let devices = NSMenuItem(title: "Blue Pointer Mouse", action: nil, keyEquivalent: "")
         devices.submenu = deviceSubmenu()
         menu.addItem(devices)
+
+        let swap = NSMenuItem(title: "Swap Pointers", action: #selector(swapPointers), keyEquivalent: "")
+        swap.target = self
+        swap.isEnabled = hidMonitor.allDevices.count == 2
+        menu.addItem(swap)
 
         let assignBlue = NSMenuItem(title: "Set Blue Pointer From Next Movement", action: #selector(assignSecondaryFromNextMovement), keyEquivalent: "")
         assignBlue.target = self
@@ -104,6 +113,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return submenu
     }
 
+    private func mainDeviceSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+
+        guard !hidMonitor.allDevices.isEmpty else {
+            let empty = NSMenuItem(title: "Move a mouse to detect devices", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+            return submenu
+        }
+
+        for device in hidMonitor.allDevices {
+            let item = NSMenuItem(title: device.name, action: #selector(selectMainDevice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device.id
+            item.state = device.id == hidMonitor.mainDeviceID ? .on : .off
+            submenu.addItem(item)
+        }
+        return submenu
+    }
+
     private func speedSubmenu() -> NSMenu {
         let submenu = NSMenu()
         for value in sensitivityOptions {
@@ -121,6 +150,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         hidMonitor.setSecondaryDevice(id: id)
+    }
+
+    @objc private func selectMainDevice(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UInt64 else {
+            return
+        }
+        hidMonitor.setMainDevice(id: id)
+    }
+
+    @objc private func swapPointers() {
+        hidMonitor.swapPointers()
     }
 
     @objc private func selectSensitivity(_ sender: NSMenuItem) {

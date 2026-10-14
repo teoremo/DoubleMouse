@@ -129,6 +129,29 @@ final class HIDMouseMonitor {
         delegate?.mouseMonitorDevicesChanged(self)
     }
 
+    /// The main pointer is whichever device is not the blue one, so choosing it means making
+    /// sure the blue pointer is some other device.
+    func setMainDevice(id: UInt64) {
+        guard id == secondaryDeviceID,
+              let other = allDevices.first(where: { $0.id != id }) else {
+            return
+        }
+        setSecondaryDevice(id: other.id)
+    }
+
+    /// The device currently driving the normal cursor, when that is unambiguous.
+    var mainDeviceID: UInt64? {
+        let others = allDevices.filter { $0.id != secondaryDeviceID }
+        return others.count == 1 ? others[0].id : nil
+    }
+
+    func swapPointers() {
+        guard allDevices.count == 2, let main = mainDeviceID else {
+            return
+        }
+        setSecondaryDevice(id: main)
+    }
+
     func assignSecondaryDeviceFromNextMovement() {
         awaitingSecondaryAssignment = true
         delegate?.mouseMonitorDevicesChanged(self)
