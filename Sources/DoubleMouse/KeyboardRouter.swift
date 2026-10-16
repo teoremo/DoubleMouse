@@ -103,6 +103,18 @@ final class KeyboardRouter {
     var onChange: (() -> Void)?
     /// Called for each key press sent to the target app.
     var onKeyTyped: (() -> Void)?
+    /// Lets the owner delay a keystroke, for example until the target app is frontmost.
+    /// It must call the closure it is given, in order.
+    /// The app the main keyboard's keys should go to right now, or nil to leave them alone.
+    var mainRedirect: (() -> NSRunningApplication?)?
+    private var redirected: [CGKeyCode: pid_t] = [:]
+    private var menuRedirected = Set<CGKeyCode>()
+    private let usageByKeyCode: [CGKeyCode: Int] = {
+        var map: [CGKeyCode: Int] = [:]
+        for (usage, code) in keyCodes where map[code] == nil { map[code] = usage }
+        return map
+    }()
+    var beforeSend: ((NSRunningApplication, @escaping () -> Void) -> Void)?
 
     /// App receiving the secondary keyboard. Set from blue-pointer clicks.
     private(set) var targetApp: NSRunningApplication?
@@ -173,40 +185,93 @@ final class KeyboardRouter {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return true
         }
-        guard selectedID != nil,
-              event.getIntegerValueField(.eventSourceUserData) != syntheticEventMarker else {
+        guard event.getIntegerValueField(.eventSourceUserData) != syntheticEventMarker else {
             return true
         }
 
         let code = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        if selectedID != nil, isSecondaryEvent(type: type, event: event, code: code) {
+            return false
+        }
+        return redirectMainEvent(type: type, event: event, code: code)
+    }
+
+    /// True for a system event that came from the secondary keyboard, which is dropped.
+    private func isSecondaryEvent(type: CGEventType, event: CGEvent, code: CGKeyCode) -> Bool {
         let now = Date()
         let isHeld = held.contains { keyCodes[$0] == code }
 
         switch type {
         case .keyDown:
             if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-                return !isHeld
+                return isHeld
             }
             if let expiry = pendingDown[code], expiry > now {
                 pendingDown[code] = nil
-                return false
+                return true
             }
         case .keyUp:
             if let expiry = pendingUp[code], expiry > now {
                 pendingUp[code] = nil
-                return false
+                return true
             }
         default: // flagsChanged: modifiers report press and release the same way.
             if let expiry = pendingDown[code], expiry > now {
                 pendingDown[code] = nil
-                return false
+                return true
             }
             if let expiry = pendingUp[code], expiry > now {
                 pendingUp[code] = nil
-                return false
+                return true
             }
         }
-        return true
+        return false
+    }
+
+    /// While a "keep active" app is forced to the front for the second keyboard, the main
+    /// keyboard would type into it too. Send the main keyboard's keys to the main app instead.
+    /// Returns true to let the event through untouched.
+    private func redirectMainEvent(type: CGEventType, event: CGEvent, code: CGKeyCode) -> Bool {
+        switch type {
+        case .keyDown:
+            guard let app = mainRedirect?(), !app.isTerminated else { return true }
+            let eventFlags = event.flags
+            if eventFlags.contains(.maskCommand), let usage = usageByKeyCode[code], let character = menuCharacter(forUsage: usage) {
+                var modifiers = 0
+                if eventFlags.contains(.maskShift) { modifiers |= 1 }
+                if eventFlags.contains(.maskAlternate) { modifiers |= 2 }
+                if eventFlags.contains(.maskControl) { modifiers |= 4 }
+                if pressMenuItem(pid: app.processIdentifier, character: character, modifiers: modifiers) {
+                    menuRedirected.insert(code)
+                    return false
+                }
+            }
+            redirected[code] = app.processIdentifier
+            repost(event, to: app.processIdentifier)
+            return false
+        case .keyUp:
+            if menuRedirected.remove(code) != nil {
+                return false
+            }
+            // Follow the press even if the redirect has ended since, so no key sticks.
+            if let pid = redirected.removeValue(forKey: code) {
+                repost(event, to: pid)
+                return false
+            }
+            return true
+        case .flagsChanged:
+            guard let app = mainRedirect?(), !app.isTerminated else { return true }
+            repost(event, to: app.processIdentifier)
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func repost(_ event: CGEvent, to pid: pid_t) {
+        guard let copy = event.copy() else { return }
+        copy.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+        copy.postToPid(pid)
     }
 
     func stop() {
@@ -322,7 +387,22 @@ final class KeyboardRouter {
     private var menuHandled = Set<Int>()
 
     private func post(usage: Int, isDown: Bool) {
-        guard let code = keyCodes[usage], let app = targetApp, !app.isTerminated else { return }
+        guard keyCodes[usage] != nil, let app = targetApp, !app.isTerminated else { return }
+
+        // Modifier state belongs to the moment of the key press, not the moment of delivery.
+        let pressFlags = flags
+        let deliver: () -> Void = { [weak self] in
+            self?.send(usage: usage, isDown: isDown, to: app, flags: pressFlags)
+        }
+        if let beforeSend {
+            beforeSend(app, deliver)
+        } else {
+            deliver()
+        }
+    }
+
+    private func send(usage: Int, isDown: Bool, to app: NSRunningApplication, flags: CGEventFlags) {
+        guard let code = keyCodes[usage], !app.isTerminated else { return }
 
         if modifierFlags[usage] == nil {
             if isDown, flags.contains(.maskCommand), let character = menuCharacter(forUsage: usage) {

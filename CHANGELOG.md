@@ -15,7 +15,7 @@ Fork changes.
 - Fixed duplicated input from one device matching several HID usages.
 - Added `DOUBLEMOUSE_DEBUG=1` logging.
 - Added hold-to-scroll for the blue pointer (hold the right button and move), because the Magic Mouse cannot scroll while captured.
-- Added `Keep <App> Active While Typing` for apps that drop their focused field when deactivated.
+- Added `Keep <App> Active While Typing` for apps that drop their focused field when deactivated: they come forward for second-keyboard typing, and the main keyboard is redirected to the main app meanwhile.
 - A real click with the main mouse now cancels a pending focus handback and updates the remembered main app.
 - Changed the bundle identifier to `com.teoremo.doublemouse`, so permissions are separate from the original app.
 

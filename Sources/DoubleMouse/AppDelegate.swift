@@ -36,9 +36,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var needsActiveApps = Set(UserDefaults.standard.stringArray(forKey: "needsActiveApps") ?? []) {
         didSet { UserDefaults.standard.set(Array(needsActiveApps), forKey: "needsActiveApps") }
     }
-    private let activeHold: TimeInterval = 3.0
+    private let activeHold: TimeInterval = 2.0
+    private var pendingSends: [() -> Void] = []
+    private var bringingForward = false
     private var handbackWork: DispatchWorkItem?
     private var heldRestoreApp: NSRunningApplication?
+    /// While set, and the target is frontmost, the main keyboard is redirected to this app.
+    private var redirectMainTo: NSRunningApplication?
+
+    private func mainRedirectTarget() -> NSRunningApplication? {
+        guard let redirectMainTo, let target = keyboardRouter.targetApp,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
+              redirectMainTo.processIdentifier != target.processIdentifier else {
+            return nil
+        }
+        return redirectMainTo
+    }
 
     private var keepFocus = UserDefaults.standard.object(forKey: "keepFocus") as? Bool ?? false {
         didSet { UserDefaults.standard.set(keepFocus, forKey: "keepFocus") }
@@ -70,6 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clickPerformer.mainGuard = mainButtonGuard
         keyboardRouter.onChange = { [weak self] in self?.rebuildMenu() }
         keyboardRouter.onKeyTyped = { [weak self] in self?.secondaryKeyTyped() }
+        keyboardRouter.mainRedirect = { [weak self] in self?.mainRedirectTarget() }
+        keyboardRouter.beforeSend = { [weak self] app, deliver in self?.prepareDelivery(to: app, deliver) ?? deliver() }
         keyboardRouter.start()
         showAccessibilityWarningIfNeeded()
         rebuildMenu()
@@ -481,6 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func holdTargetActive(then app: NSRunningApplication) {
         heldRestoreApp = app
+        redirectMainTo = app
         blueFocusGuardUntil = Date().addingTimeInterval(activeHold + 0.7)
         handbackWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -494,6 +510,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + activeHold, execute: work)
     }
 
+    /// Apps marked "keep active" lose their focused field when deactivated, so a keystroke for
+    /// one that is in the background first brings it forward, then focus goes back to the
+    /// main app once the typing stops. Keystrokes wait their turn so none are lost or reordered.
+    private func prepareDelivery(to app: NSRunningApplication, _ deliver: @escaping () -> Void) {
+        guard let id = app.bundleIdentifier, needsActiveApps.contains(id) else {
+            deliver()
+            return
+        }
+
+        let front = NSWorkspace.shared.frontmostApplication
+        if front?.processIdentifier == app.processIdentifier, !bringingForward {
+            // Already frontmost, whether from a hold or from the main mouse.
+            deliver()
+            return
+        }
+
+        pendingSends.append(deliver)
+        guard !bringingForward else { return }
+        bringingForward = true
+
+        let returnTo = (front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? mainFocusApp : front) ?? mainFocusApp
+        redirectMainTo = returnTo
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        if AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) != .success {
+            app.activate()
+        }
+        blueFocusGuardUntil = Date().addingTimeInterval(activeHold + 1.0)
+        debugLog("bringing \(app.localizedName ?? "?") forward, will return to \(returnTo?.localizedName ?? "?")")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.bringingForward = false
+            let sends = self.pendingSends
+            self.pendingSends.removeAll()
+            sends.forEach { $0() }
+            if let returnTo, returnTo.processIdentifier != app.processIdentifier {
+                self.holdTargetActive(then: returnTo)
+            }
+        }
+    }
+
     /// Typing on the second keyboard keeps the held app active a little longer.
     private func secondaryKeyTyped() {
         guard handbackWork != nil, let app = heldRestoreApp else { return }
@@ -501,12 +558,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func cancelHold() {
+        redirectMainTo = nil
         handbackWork?.cancel()
         handbackWork = nil
         heldRestoreApp = nil
     }
 
     private func handBack(to app: NSRunningApplication) {
+        redirectMainTo = nil
         blueFocusGuardUntil = Date().addingTimeInterval(0.7)
 
         // The target app activates asynchronously, so check twice before letting go.
