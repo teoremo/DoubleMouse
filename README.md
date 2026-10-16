@@ -83,7 +83,7 @@ Set `DOUBLEMOUSE_DEBUG=1` to log the detected devices, whether each could be ope
 ## Build The DMG
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/package-release.sh 1.3.0
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/package-release.sh 1.3.1
 ```
 
 The script uses only native macOS tools and writes the DMG plus SHA-256 checksum to `dist/`. Without arguments it signs ad hoc, which needs no certificate but leaves the first launch behind a Gatekeeper warning and makes macOS ask for the permissions again after every rebuild. Setting `CODESIGN_IDENTITY` to an Apple Development certificate (`security find-identity -v -p codesigning`) keeps a stable signature.
