@@ -56,12 +56,12 @@ final class ClickPerformer {
         postMouseEvent(.leftMouseUp, button: .left, at: point, returningTo: returnPoint)
     }
 
-    func scroll(at point: CGPoint, delta: CGPoint) {
+    func scroll(at point: CGPoint, delta: CGPoint, pixels: Bool = false) {
         let returnPoint = currentCursor()
         guard delta != .zero,
               let event = CGEvent(
                 scrollWheelEvent2Source: source,
-                units: .line,
+                units: pixels ? .pixel : .line,
                 wheelCount: 2,
                 wheel1: Int32(clamping: Int(delta.y)),
                 wheel2: Int32(clamping: Int(delta.x)),

@@ -12,12 +12,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mainButtonGuard = MainButtonGuard()
     private var blueIgnoringPress = false
     private var moveLogCount = 0
+
+    /// Hold the blue device's right button and move to scroll. Needed for the Magic Mouse,
+    /// whose touch surface cannot be read while the device is captured.
+    private var holdToScroll = UserDefaults.standard.object(forKey: "holdToScroll") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(holdToScroll, forKey: "holdToScroll") }
+    }
+    private var blueRightIsDown = false
+    private var blueRightScrolled = false
+    private var blueRightTravel = CGPoint.zero
+    private var scrollRemainder = CGPoint.zero
     private var appToRestore: NSRunningApplication?
     /// The app the main keyboard is typing into: the last app activated by anything other
     /// than a blue click.
     private var mainFocusApp = NSWorkspace.shared.frontmostApplication
     /// Activations before this time are blue-click side effects, not the user switching apps.
     private var blueFocusGuardUntil = Date.distantPast
+    /// Bumped whenever the main mouse clicks, which cancels any pending focus handback.
+    private var restoreGeneration = 0
+
+    /// Apps that lose their focused field when deactivated (found by trial: WhatsApp,
+    /// Todoist). They stay frontmost after a blue click until the second keyboard goes idle.
+    private var needsActiveApps = Set(UserDefaults.standard.stringArray(forKey: "needsActiveApps") ?? []) {
+        didSet { UserDefaults.standard.set(Array(needsActiveApps), forKey: "needsActiveApps") }
+    }
+    private let activeHold: TimeInterval = 3.0
+    private var handbackWork: DispatchWorkItem?
+    private var heldRestoreApp: NSRunningApplication?
 
     private var keepFocus = UserDefaults.standard.object(forKey: "keepFocus") as? Bool ?? false {
         didSet { UserDefaults.standard.set(keepFocus, forKey: "keepFocus") }
@@ -44,9 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         overlay.show()
         hidMonitor.start()
+        mainButtonGuard.onRealPress = { [weak self] in self?.mainPointerClicked() }
         mainButtonGuard.start()
         clickPerformer.mainGuard = mainButtonGuard
         keyboardRouter.onChange = { [weak self] in self?.rebuildMenu() }
+        keyboardRouter.onKeyTyped = { [weak self] in self?.secondaryKeyTyped() }
         keyboardRouter.start()
         showAccessibilityWarningIfNeeded()
         rebuildMenu()
@@ -80,6 +103,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appearance.submenu = appearanceSubmenu()
         menu.addItem(appearance)
 
+        if let target = keyboardRouter.targetApp, let id = target.bundleIdentifier {
+            let hold = NSMenuItem(title: "Keep \(target.localizedName ?? "App") Active While Typing", action: #selector(toggleNeedsActive(_:)), keyEquivalent: "")
+            hold.target = self
+            hold.representedObject = id
+            hold.state = needsActiveApps.contains(id) ? .on : .off
+            menu.addItem(hold)
+        } else {
+            let hold = NSMenuItem(title: "Keep Clicked App Active While Typing (click an app first)", action: nil, keyEquivalent: "")
+            hold.isEnabled = false
+            menu.addItem(hold)
+        }
+
         let swap = NSMenuItem(title: "Swap Pointers", action: #selector(swapPointers), keyEquivalent: "")
         swap.target = self
         swap.isEnabled = hidMonitor.allDevices.count == 2
@@ -105,6 +140,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         accelerationItem.target = self
         accelerationItem.state = overlay.acceleration ? .on : .off
         menu.addItem(accelerationItem)
+
+        let scrollItem = NSMenuItem(title: "Hold Right Button to Scroll", action: #selector(toggleHoldToScroll), keyEquivalent: "")
+        scrollItem.target = self
+        scrollItem.state = holdToScroll ? .on : .off
+        menu.addItem(scrollItem)
 
         let focusItem = NSMenuItem(title: "Keep Keyboard Focus With Main Pointer", action: #selector(toggleKeepFocus), keyEquivalent: "")
         focusItem.target = self
@@ -350,6 +390,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func toggleHoldToScroll() {
+        holdToScroll.toggle()
+        rebuildMenu()
+    }
+
     @objc private func toggleKeepFocus() {
         keepFocus.toggle()
         rebuildMenu()
@@ -368,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appToRestore = nil
             return
         }
-        blueFocusGuardUntil = Date().addingTimeInterval(1.0)
+        blueFocusGuardUntil = Date().addingTimeInterval(0.7)
         appToRestore = mainFocusApp
     }
 
@@ -378,14 +423,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return point.y >= screen.visibleFrame.maxY
     }
 
+    /// Debug: what the clicked app considers focused, to tell a swallowed click from a lost focus.
+    private func logFocus(of app: NSRunningApplication?, label: String) {
+        guard let app else { return }
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        var focused: CFTypeRef?
+        var description = "none"
+        if AXUIElementCopyAttributeValue(element, kAXFocusedUIElementAttribute as CFString, &focused) == .success, let focused {
+            let ui = focused as! AXUIElement
+            var role: CFTypeRef?
+            var title: CFTypeRef?
+            AXUIElementCopyAttributeValue(ui, kAXRoleAttribute as CFString, &role)
+            AXUIElementCopyAttributeValue(ui, kAXDescriptionAttribute as CFString, &title)
+            description = "\(role as? String ?? "?") \(title as? String ?? "")"
+        }
+        var windowFocused: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &windowFocused)
+        debugLog("focus[\(label)] \(app.localizedName ?? "?") element=\(description) window=\(windowFocused != nil) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")")
+    }
+
+    /// A real click with the main pointer is the user choosing the main keyboard's app, so a
+    /// handback still waiting to fire must not pull focus away from it.
+    private func mainPointerClicked() {
+        restoreGeneration += 1
+        appToRestore = nil
+        cancelHold()
+        let generation = restoreGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, generation == self.restoreGeneration,
+                  let front = NSWorkspace.shared.frontmostApplication,
+                  front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            self.mainFocusApp = front
+            debugLog("main focus app -> \(front.localizedName ?? "?")")
+        }
+    }
+
     private func restoreFrontApp() {
+        let clicked = keyboardRouter.targetApp
+        for (delay, label) in [(0.05, "50ms"), (0.3, "300ms"), (0.8, "800ms")] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.logFocus(of: clicked, label: label)
+            }
+        }
+        handbackWork?.cancel()
+        handbackWork = nil
         guard let app = appToRestore else { return }
-        blueFocusGuardUntil = Date().addingTimeInterval(1.0)
         appToRestore = nil
 
+        // Some apps drop their focused field the moment they are deactivated, so they can
+        // only be typed into while active. Leave those frontmost until the typing stops.
+        if let id = clicked?.bundleIdentifier, needsActiveApps.contains(id), clicked?.processIdentifier != app.processIdentifier {
+            holdTargetActive(then: app)
+            return
+        }
+        handBack(to: app)
+    }
+
+    private func holdTargetActive(then app: NSRunningApplication) {
+        heldRestoreApp = app
+        blueFocusGuardUntil = Date().addingTimeInterval(activeHold + 0.7)
+        handbackWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let app = self.heldRestoreApp else { return }
+            self.heldRestoreApp = nil
+            self.handbackWork = nil
+            debugLog("hold over, handing back to \(app.localizedName ?? "?")")
+            self.handBack(to: app)
+        }
+        handbackWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + activeHold, execute: work)
+    }
+
+    /// Typing on the second keyboard keeps the held app active a little longer.
+    private func secondaryKeyTyped() {
+        guard handbackWork != nil, let app = heldRestoreApp else { return }
+        holdTargetActive(then: app)
+    }
+
+    private func cancelHold() {
+        handbackWork?.cancel()
+        handbackWork = nil
+        heldRestoreApp = nil
+    }
+
+    private func handBack(to app: NSRunningApplication) {
+        blueFocusGuardUntil = Date().addingTimeInterval(0.7)
+
         // The target app activates asynchronously, so check twice before letting go.
+        let generation = restoreGeneration
         func restore(attempt: Int) {
-            if !app.isTerminated, NSWorkspace.shared.frontmostApplication != app {
+            if generation == restoreGeneration, !app.isTerminated, NSWorkspace.shared.frontmostApplication != app {
                 let element = AXUIElementCreateApplication(app.processIdentifier)
                 let result = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
                 if result != .success {
@@ -396,6 +523,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { restore(attempt: 1) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { restore(attempt: 2) }
+    }
+
+    @objc private func toggleNeedsActive(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if needsActiveApps.contains(id) {
+            needsActiveApps.remove(id)
+        } else {
+            needsActiveApps.insert(id)
+        }
+        rebuildMenu()
     }
 
     @objc private func toggleAcceleration() {
@@ -441,6 +578,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: HIDMouseMonitorDelegate {
     func mouseMonitor(_ monitor: HIDMouseMonitor, didMoveSecondaryBy delta: CGPoint) {
+        if holdToScroll, blueRightIsDown {
+            scrollWhileRightHeld(delta)
+            return
+        }
         overlay.moveSecondaryBy(delta)
         moveLogCount += 1
         if moveLogCount % 15 == 0 {
@@ -463,12 +604,50 @@ extension AppDelegate: HIDMouseMonitorDelegate {
         }
     }
 
+    /// Dragging scrolls like grabbing the content: moving down pulls the page down.
+    private func scrollWhileRightHeld(_ delta: CGPoint) {
+        blueRightTravel.x += abs(delta.x)
+        blueRightTravel.y += abs(delta.y)
+        // A small wobble while pressing is still a right click, not a scroll.
+        guard blueRightScrolled || hypot(blueRightTravel.x, blueRightTravel.y) >= 4 else {
+            return
+        }
+        blueRightScrolled = true
+
+        let pixelsPerCount = 2.0 * overlay.sensitivity
+        scrollRemainder.x += delta.x * pixelsPerCount
+        scrollRemainder.y += delta.y * pixelsPerCount
+        let whole = CGPoint(x: scrollRemainder.x.rounded(.towardZero), y: scrollRemainder.y.rounded(.towardZero))
+        guard whole != .zero else {
+            return
+        }
+        scrollRemainder.x -= whole.x
+        scrollRemainder.y -= whole.y
+        clickPerformer.scroll(at: overlay.secondaryPointerPosition, delta: whole, pixels: true)
+    }
+
     func mouseMonitor(_ monitor: HIDMouseMonitor, didScrollSecondaryBy delta: CGPoint) {
         clickPerformer.scroll(at: overlay.secondaryPointerPosition, delta: delta)
     }
 
     func mouseMonitor(_ monitor: HIDMouseMonitor, didChangeSecondaryButton button: MouseButton, isPressed: Bool) {
         guard button == .left else {
+            if holdToScroll {
+                if isPressed {
+                    blueRightIsDown = true
+                    blueRightScrolled = false
+                    blueRightTravel = .zero
+                    scrollRemainder = .zero
+                    return
+                }
+                let wasScrolling = blueRightScrolled
+                blueRightIsDown = false
+                blueRightScrolled = false
+                if wasScrolling {
+                    return
+                }
+            }
+
             // Right button: no drag, macOS has no second button state to spare anyway.
             if !isPressed, !mainButtonGuard.isMainButtonDown, !blueDragStarted {
                 rememberFrontApp()

@@ -14,6 +14,9 @@ Fork changes.
 - Fixed the pointer stopping short on displays of different sizes: one overlay window per display, and the pointer stays on real screen area.
 - Fixed duplicated input from one device matching several HID usages.
 - Added `DOUBLEMOUSE_DEBUG=1` logging.
+- Added hold-to-scroll for the blue pointer (hold the right button and move), because the Magic Mouse cannot scroll while captured.
+- Added `Keep <App> Active While Typing` for apps that drop their focused field when deactivated.
+- A real click with the main mouse now cancels a pending focus handback and updates the remembered main app.
 - Changed the bundle identifier to `com.teoremo.doublemouse`, so permissions are separate from the original app.
 
 ## 1.2.2 - 2026-07-29

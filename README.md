@@ -41,6 +41,7 @@ The permissions belong to the signature of the app. If you rebuild with a differ
 - A **secondary keyboard**: pick a second keyboard and its keystrokes go to the app you last clicked with the blue pointer, while the other keyboard keeps typing into the frontmost app.
 - **Pointer appearance**: color presets plus a color picker, standard or mirrored arrow, five sizes, and a fading trail. The arrow has a contrasting border and a shadow, white on dark colors and black on light ones.
 - Clicks on one pointer do not disturb the other: a blue click is ignored while the main button is held, and the main cursor is put back where it was.
+- **Hold-to-scroll**: hold the blue device's right button and move to scroll, which is the only way to scroll with a Magic Mouse (its touch surface cannot be read while the device is captured). A quick right-click still opens the context menu.
 - Slow speeds down to 0.1×, for large displays.
 - Works across displays of different sizes and layouts.
 - No analytics, accounts, network access, or kernel extension.
@@ -59,6 +60,7 @@ The implementation uses public AppKit, IOKit, Accessibility, and CoreGraphics AP
 - The blue pointer does not trigger hover: buttons do not highlight under it, tooltips do not appear, and submenus do not open. macOS keeps a single cursor position, so putting the real cursor on the blue pointer and bringing it back on every movement would leave the real one jittering constantly. Clicking, scrolling, and dragging are unaffected.
 - The second keyboard targets an app, not a window, so two windows of one app cannot be split. Some apps ignore keystrokes while inactive, and keys macOS handles globally (Cmd+Tab, Spotlight, brightness and volume) are not routed. Pressing the same key on both keyboards within about a quarter of a second can drop one press.
 - With a secondary keyboard selected, a blue click hands focus straight back to the app the main keyboard is using. To type into the app you clicked, use the secondary keyboard.
+- Some apps (WhatsApp and Todoist among them) lose their focused text field as soon as they are deactivated, so the second keyboard cannot type into them from the background. Mark them with `Keep <App> Active While Typing`: they stay frontmost after a blue click, and focus returns to your main app after 3 seconds without second-keyboard typing.
 - Some games, remote desktops, canvases, or custom controls may reject synthetic pointer events.
 - The blue device is remembered by USB/Bluetooth port, so moving a mouse to a different port clears the selection.
 

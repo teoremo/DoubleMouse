@@ -9,6 +9,9 @@ let syntheticEventMarker: Int64 = 0x444D4F55 // "DMOU"
 /// clicks. This watches the main device's real buttons (to hold off blue clicks while one
 /// is down) and can swallow them while a blue drag is in progress.
 final class MainButtonGuard {
+    /// Called for each real (not DoubleMouse-made) button press of the main device.
+    var onRealPress: (() -> Void)?
+
     /// While true, real button events from the main device are dropped.
     var blocksMainButtons = false
 
@@ -89,6 +92,7 @@ final class MainButtonGuard {
                 return nil
             }
             downButtons.insert(button)
+            onRealPress?()
         } else {
             // Drop the release of a press we dropped; pass the release of one we let through.
             if droppedButtons.remove(button) != nil {

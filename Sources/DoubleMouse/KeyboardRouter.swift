@@ -101,6 +101,8 @@ struct HIDKeyboard {
 /// the selected keyboard is remembered, and an event tap drops the matching system event.
 final class KeyboardRouter {
     var onChange: (() -> Void)?
+    /// Called for each key press sent to the target app.
+    var onKeyTyped: (() -> Void)?
 
     /// App receiving the secondary keyboard. Set from blue-pointer clicks.
     private(set) var targetApp: NSRunningApplication?
@@ -302,6 +304,7 @@ final class KeyboardRouter {
         let expiry = Date().addingTimeInterval(suppressWindow)
 
         if isDown {
+            onKeyTyped?()
             guard held.insert(usage).inserted else { return }
             pendingDown[keyCodes[usage]!] = expiry
             if let flag = modifierFlags[usage] { flags.insert(flag) }
